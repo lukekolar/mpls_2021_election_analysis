@@ -1,0 +1,173 @@
+---
+title: "mpls_2021_election_analysis"
+author: "Luke Kolar"
+date: "1/26/2021"
+output: html_document
+---
+
+```{r, echo = F, message = F}
+
+library(tidyverse)
+library(sf)
+library(rgdal)
+library(janitor)
+library(shapefiles)
+library(readxl)
+
+```
+
+```{r}
+voting_dists_16_raw <- readOGR( 
+  dsn = paste0(getwd(),"/data/voting-districts-2016_2018/"), 
+  layer = "general_election_results_by_precinct_2016",
+  verbose = FALSE) 
+
+voting_dists_16_messy <- spTransform(voting_dists_16_raw, 
+            CRS("+proj=longlat +datum=WGS84 +no_defs +ellps=WGS84 +towgs84=0,0,0"))
+
+voting_dists_16 <- st_as_sf(voting_dists_16_messy) %>% 
+  clean_names() %>% 
+  filter(countycode == 27, mcdname == "Minneapolis") %>% 
+  mutate(ward_num = as.numeric(str_remove_all(ward, "W-")),
+         pct_num = str_remove_all(shortlabel, paste0("W-[:digit:] P-"))) %>% 
+  mutate(pct_num = str_remove_all(pct_num, paste0("W-[:digit:][:digit:] P-")))
+
+```
+
+```{r}
+
+election_stats <- read_xlsx("data/2017-General-Election-Statistics-by-Ward-and-Precinct.xlsx",
+                            skip = 5,
+                            col_names = c("ward_num", "pct_num", "reg_voters_7am",
+                                          "reg_voters_at_polls", "reg_voters_absentee",
+                                          "total_reg", "poll_ballots", "poll_absentee",
+                                          "total_ballots", "total_turnout", "perc_absentee",
+                                          "perc_reg_on_e_day", "spoiled_ballots")) %>% 
+  filter(!is.na(ward_num))
+
+ward_subtotal_election_stats <- election_stats %>% 
+  filter(is.na(pct_num)) %>% 
+  select(!pct_num) %>% 
+  mutate(ward_num = str_remove_all(ward_num, "Ward ")) %>% 
+  mutate(ward_num = as.numeric(str_remove_all(ward_num, " Subtotal")))
+
+precinct_subtotal_election_stats <- election_stats %>% 
+  filter(!is.na(pct_num)) %>% 
+  mutate(ward_num = str_remove_all(ward_num, "Ward ")) %>% 
+  mutate(ward_num = as.numeric(str_remove_all(ward_num, " Subtotal")))
+
+```
+
+
+```{r}
+
+voting_dists_16_sum <- voting_dists_16 %>% 
+  group_by(ward_num) %>%
+  summarize(geometry = st_union(geometry)) %>% 
+  ungroup() %>% 
+  full_join(ward_subtotal_election_stats, by = "ward_num") %>% 
+  mutate(ward_num = as.character(ward_num)) %>% 
+  mutate(overall_reg = reg_voters_7am + total_reg)
+
+vd16sum_points <- st_point_on_surface(voting_dists_16_sum)
+vd16sum_coords <- as.data.frame(st_coordinates(vd16sum_points))
+vd16sum_coords$ward_num <- voting_dists_16_sum$ward_num
+
+mid.reg <- mean(voting_dists_16_sum$overall_reg)
+
+reg <- ggplot(voting_dists_16_sum, aes(fill = overall_reg)) + 
+  geom_sf(color = "grey30", lwd = 0.25) + 
+  geom_label(data = vd16sum_coords, aes(X, Y, label = ward_num), fill = "white", size = 4) +
+  scale_fill_gradient2(low = "red", high = "blue", midpoint = mid.reg) +
+  theme_void() + labs(title = "Mpls 2017: number of registered voters, by ward", 
+                      fill = "registered\nvoters")
+
+mid.to <- mean(voting_dists_16_sum$total_turnout)*100
+
+to <- ggplot(voting_dists_16_sum, aes(fill = total_turnout*100)) + 
+  geom_sf(color = "grey30", lwd = 0.25) + 
+  geom_label(data = vd16sum_coords, aes(X, Y, label = ward_num), fill = "white", size = 4) +
+  scale_fill_gradient2(low = "red", high = "darkgreen", midpoint = mid.to) +
+  theme_void() + labs(title = "Mpls 2017: percent turnout, by ward", fill = "% turnout")
+
+```
+
+```{r}
+
+voting_dists_16_pct <- voting_dists_16 %>%
+  select(ward_num, pct_num, geometry) %>%
+  full_join(precinct_subtotal_election_stats, by = c("pct_num", "ward_num")) %>% 
+  mutate(overall_reg = reg_voters_7am + total_reg) %>% 
+  filter(!is.na(total_turnout))
+
+mid.to_pct <- mean(voting_dists_16_pct$total_turnout)*100
+
+ggplot(voting_dists_16_pct, aes(fill = total_turnout*100)) + 
+  geom_sf(color = "grey30", lwd = 0.25) +
+  scale_fill_gradient2(low = "red", high = "darkgreen", midpoint = mid.to_pct) +
+  theme_void() + labs(title = "Mpls 2017: percent turnout, by precinct", 
+                      fill = "% turnout")
+
+mid.reg_pct <- mean(voting_dists_16_pct$overall_reg)
+
+ggplot(voting_dists_16_pct, aes(fill = overall_reg)) + 
+  geom_sf(color = "grey30", lwd = 0.25) +
+  scale_fill_gradient(low = "white", high = "blue") +
+  theme_void() + labs(title = "Mpls 2017: number of registered voters, by precinct", 
+                      fill = "registered\nvoters")
+
+voting_dists_16_pct %>% View
+
+```
+
+
+```{r}
+bg_hennepin_2019 <- read.dbf(paste0(getwd(),"/data/mn_acs_2015-2019/CensusACSBlockGroup.dbf")) %>%
+  as.data.frame() %>% 
+  clean_names() %>% 
+  filter(dbf_year == "2019",
+         dbf_county == "053")
+
+names(bg_hennepin_2019) <- substring(names(bg_hennepin_2019), 5)
+```
+
+
+```{r}
+
+census_bg_2019_raw <- readOGR( 
+  dsn = paste0(getwd(),"/data/cb_2019_27_bg_500k/"), 
+  layer = "cb_2019_27_bg_500k",
+  verbose = FALSE) 
+
+census_bg_2019_messy <- spTransform(census_bg_2019_raw, 
+            CRS("+proj=longlat +datum=WGS84 +no_defs +ellps=WGS84 +towgs84=0,0,0"))
+
+census_bg_2019 <- st_as_sf(census_bg_2019_messy) %>% 
+  clean_names() %>% 
+  filter(countyfp == "053") %>% 
+  full_join(bg_hennepin_2019, by = c("geoid" = "geoid2")) %>%
+  arrange(desc(tractce)) %>% 
+  mutate(tract = as.numeric(tract)) %>% 
+  filter(!between(tract, 125, 750)) %>% 
+  filter(tract < 1000) %>%   
+  filter(!tract %in% c(872:874)) %>% 
+  mutate(awater = as.numeric(awater),
+         aland = as.numeric(aland))
+
+census_bg_2019 %>% 
+  ggplot(., aes(fill = aland)) + 
+  scale_fill_viridis_c() +
+  geom_sf(color = "grey30", lwd = 0.25)
+
+
+```
+
+
+
+
+
+
+
+
+
+
